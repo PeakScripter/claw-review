@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_hooks_commands.py::test_hook_pre_review_passes_on_zero tests/test_hooks_commands.py::test_hook_receives_payload_on_stdin tests/test_tools.py::test_glob_lists_python_files -v)",
+      "Bash(python -m pytest --tb=short)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -x -q)",
+      "Bash(venv/Scripts/python.exe -m pytest tests/ -x -q)",
+      "Bash(venv/Scripts/python.exe -m pytest tests/test_hooks_commands.py::test_hook_receives_payload_on_stdin -v)",
+      "Bash(venv/Scripts/python.exe -m pytest tests/ -q)",
+      "Bash(venv/Scripts/pip install *)",
+      "Bash(venv/Scripts/python -c \"from prompt_toolkit import PromptSession; from prompt_toolkit.completion import WordCompleter; print\\('ok'\\)\")",
+      "Bash(venv/Scripts/python -c \"from review_agent.repl import ReviewREPL, _print_welcome; from rich.console import Console; c = Console\\(\\); _print_welcome\\(c\\); print\\('welcome rendered ok'\\)\")",
+      "Bash(venv/Scripts/python -c ' *)"
+    ]
+  }
+}

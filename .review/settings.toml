@@ -1,0 +1,18 @@
+[llm]
+provider = "groq"
+coordinator_model = "openai/gpt-oss-120b"
+sub_reviewer_model = "llama-3.3-70b-versatile"
+temperature = 0.0
+max_tokens = 4096
+
+[review]
+sub_reviewers = ["correctness"]
+severity_threshold = "low"
+output_format = "markdown"
+
+[permissions.allow]
+read_file = ["**/*"]
+grep = ["**/*"]
+glob = ["**/*"]
+git_diff = ["*"]
+add_finding = ["*"]

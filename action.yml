@@ -1,0 +1,176 @@
+name: "AI Code Review"
+description: "Run the read-only AI code review agent and post findings as PR comments"
+author: "review-agent"
+
+branding:
+  icon: "search"
+  color: "blue"
+
+inputs:
+  groq-api-key:
+    description: "Groq API key (required)"
+    required: true
+
+  reviewers:
+    description: "Comma-separated reviewer list, or 'all'. Default: correctness,security,tests"
+    required: false
+    default: "correctness,security,tests"
+
+  model:
+    description: "Groq coordinator model"
+    required: false
+    default: "openai/gpt-oss-120b"
+
+  sub-model:
+    description: "Groq model for sub-reviewers"
+    required: false
+    default: "llama-3.3-70b-versatile"
+
+  format:
+    description: "Output format: markdown | json | sarif | github. Default: sarif"
+    required: false
+    default: "sarif"
+
+  sarif-category:
+    description: "Category label for the GitHub Code Scanning upload"
+    required: false
+    default: "review-agent"
+
+  post-comments:
+    description: "Post inline review comments on the PR (requires write permissions)"
+    required: false
+    default: "true"
+
+  severity-threshold:
+    description: "Minimum severity to post as PR comment: critical|high|medium|low|info"
+    required: false
+    default: "low"
+
+  max-iterations:
+    description: "Maximum LLM tool-call iterations per reviewer"
+    required: false
+    default: "12"
+
+outputs:
+  findings-count:
+    description: "Total number of deduplicated findings"
+
+  sarif-file:
+    description: "Path to the generated SARIF file (when format includes sarif)"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install review-agent
+      shell: bash
+      run: |
+        pip install --quiet \
+          "groq>=0.11" \
+          "pydantic>=2.7" \
+          "typer>=0.12" \
+          "rich>=13.7" \
+          "httpx>=0.27" \
+          "pyyaml>=6.0"
+        pip install --quiet -e "${{ github.action_path }}" || true
+
+    - name: Determine PR diff range
+      id: diff-range
+      shell: bash
+      run: |
+        BASE="${{ github.event.pull_request.base.sha }}"
+        HEAD="${{ github.event.pull_request.head.sha }}"
+        echo "range=${BASE}..${HEAD}" >> "$GITHUB_OUTPUT"
+        echo "head_sha=${HEAD}" >> "$GITHUB_OUTPUT"
+
+    - name: Run review agent
+      id: review
+      shell: bash
+      env:
+        GROQ_API_KEY: ${{ inputs.groq-api-key }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        OUTDIR="${RUNNER_TEMP}/review-agent-$$"
+        mkdir -p "$OUTDIR"
+        SARIF_FILE="$OUTDIR/results.sarif"
+        JSON_FILE="$OUTDIR/results.json"
+        GITHUB_FILE="$OUTDIR/github-comments.json"
+
+        RANGE="${{ steps.diff-range.outputs.range }}"
+
+        # Run the review, emit all three formats simultaneously.
+        python -m review_agent.cli \
+          --task "diff:${RANGE}" \
+          --reviewers "${{ inputs.reviewers }}" \
+          --model "${{ inputs.model }}" \
+          --sub-model "${{ inputs.sub-model }}" \
+          --max-iterations "${{ inputs.max-iterations }}" \
+          --print \
+        | python -c "
+        import sys, json, os
+        from review_agent.findings.format import format_sarif, format_json, format_github
+        from review_agent.findings.model import Finding
+
+        events = [json.loads(l) for l in sys.stdin if l.strip()]
+        final = next((e for e in reversed(events) if e.get('type') == 'final'), None)
+        findings = [Finding(**f) for f in (final.get('findings', []) if final else [])]
+
+        threshold = os.environ.get('SEVERITY_THRESHOLD', 'low')
+        order = ['critical','high','medium','low','info']
+        t_idx = order.index(threshold) if threshold in order else 3
+        filtered = [f for f in findings if order.index(f.severity) <= t_idx]
+
+        open('$SARIF_FILE', 'w').write(format_sarif(findings))
+        open('$JSON_FILE', 'w').write(format_json(findings))
+        open('$GITHUB_FILE', 'w').write(format_github(filtered))
+        print(f'::notice::review-agent: {len(findings)} finding(s) total, {len(filtered)} above threshold.')
+        print(len(findings))
+        " > /tmp/findings_count.txt
+        SEVERITY_THRESHOLD="${{ inputs.severity-threshold }}"
+        export SEVERITY_THRESHOLD
+
+        echo "sarif-file=${SARIF_FILE}" >> "$GITHUB_OUTPUT"
+        echo "json-file=${JSON_FILE}" >> "$GITHUB_OUTPUT"
+        echo "github-file=${GITHUB_FILE}" >> "$GITHUB_OUTPUT"
+        echo "findings-count=$(cat /tmp/findings_count.txt | tail -1)" >> "$GITHUB_OUTPUT"
+
+    - name: Upload SARIF to code scanning
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: ${{ steps.review.outputs.sarif-file }}
+        category: ${{ inputs.sarif-category }}
+
+    - name: Post inline review comments
+      if: inputs.post-comments == 'true' && github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const data = JSON.parse(fs.readFileSync('${{ steps.review.outputs.github-file }}', 'utf8'));
+          const comments = data.comments || [];
+          if (!comments.length) {
+            console.log('No findings above threshold — nothing to post.');
+            return;
+          }
+          const pr = context.payload.pull_request;
+          await github.rest.pulls.createReview({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: pr.number,
+            commit_id: '${{ steps.diff-range.outputs.head_sha }}',
+            event: 'COMMENT',
+            body: `review-agent found ${comments.length} finding(s). See the Security tab for the full SARIF report.`,
+            comments: comments,
+          });
+          console.log(`Posted ${comments.length} review comment(s).`);
+
+    - name: Set findings count output
+      shell: bash
+      run: echo "findings-count=${{ steps.review.outputs.findings-count }}" >> "$GITHUB_OUTPUT"
